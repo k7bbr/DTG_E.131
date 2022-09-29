@@ -7,7 +7,7 @@
 //  NUM_STRIPS - if using less than 32, put this at the number you are using
 //  DMX_UNIVERSE - starting universe
 //  UNIVERSE_COUNT = number of universes, should be #strips * universes per strip
-//  IPAddress - static address only, DHCP not enabled at present
+//  IPAddress - for static address only, DHCP will be attempted if available on network
 //  pinList - only list the pins used, only allows NUM_STRIPS worth of pins to be used.  Should be listed in sequential universe count order. 
 
 #include <OctoWS2811.h>
@@ -21,9 +21,10 @@
  
 //Compile Time DEFINES 
 #define ETHERNET_BUFFER 636 //540 is artnet leave at 636 for e1.31
-#define NUM_LEDS_PER_STRIP 680 //170 per universe //680 default
-#define NUM_STRIPS 32 //make sure pin list is accurate
+#define NUM_LEDS_PER_STRIP 170 //170 per universe //680 default
+#define NUM_STRIPS 32  //make sure pin list is accurate //32 default
 #define DMX_SUBNET 0
+
 
 int unsigned DMX_UNIVERSE = 1; //**Start** universe 1, 9, 17, 25, 33, 41
 int unsigned UNIVERSE_COUNT = 128; //How Many Universes 8, 8, 8, 4, 8, 8
@@ -31,6 +32,9 @@ int unsigned UNIVERSE_LAST = DMX_UNIVERSE + UNIVERSE_COUNT - 1; // List the last
 int unsigned CHANNEL_COUNT = 510; //max channels per dmx packet
 byte unsigned LEDS_PER_UNIVERSE = 170; // Max RGB pixels for e1.31 universe//170 default
 int unsigned NUM_LEDS  = UNIVERSE_COUNT * LEDS_PER_UNIVERSE; //
+
+//byte e131LastSequenceNumber[UNIVERSE_COUNT]; // to detect packet loss DDP handling
+
 
 //ethernet setup
 unsigned char packetBuffer[ETHERNET_BUFFER];
@@ -42,14 +46,17 @@ unsigned long previousMillis = 0;
 EthernetUDP Udp;
 uint8_t mac[6]; //this is determined from the Teensy 4.1 board.  
 IPAddress ip(192,168,1,10); //static ip address of board
+IPAddress myDns(192, 168, 1, 1); //DNS ip address
 #define UDP_PORT 5568 //E1.31 UDP Port Number
-
+#define ARTNET_DEFAULT_PORT 6454
+#define DDP_DEFAULT_PORT    4048
 
 //set up OctoWS2811 and FastLED for Teensy 4.1
 const int numPins = NUM_STRIPS;
 //byte pinList[numPins] = {2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,16,27,28,29,30,31,35,36,37,38,39,40,41,42,43,44,45}; //listed sequentially, can be changed to meet hardware needs
 //byte pinList[numPins[ = {37,36,35,34,15,14,39,38,19,18,17,16,23,22,21,20,9,8,7,6,13,12,11,10,27,26,25,24,32,31,30,28} //pinout order for the DTG WS2811 with the adamtech 4xRJ45 Ports
-byte pinList[numPins] = {34,35,36,37,38,39,14,15,16,17,18,19,20,21,22,23,6,7,8,9,10,11,12,13,24,25,26,27,28,30,31,32}; //pinout order for DTG WS2811
+//byte pinList[numPins] = {34,35,36,37,38,39,14,15,16,17,18,19,20,21,22,23,6,7,8,9,10,11,12,13,24,25,26,27,28,30,31,32}; //pinout order for DTG WS2811
+byte pinList[numPins] = {34,35,36,37}; //pinout order for DTG WS2811
 
 const int ledsPerStrip = NUM_LEDS_PER_STRIP; //this should be NUM_LEDS / numPins => VERIFY THIS MATCHES THE HARDWARE!! //should also be multiples of a single universe of leds
 CRGB rgbarray[numPins * ledsPerStrip];
@@ -76,7 +83,6 @@ public:
     virtual void init() {}
     virtual void showPixels(PixelController<RGB_ORDER, 8, 0xFF> &pixels)
     {
-
         uint32_t i = 0;
         while (pixels.has(1))
         {
@@ -94,32 +100,48 @@ public:
 
 CTeensy4Controller<RGB, WS2811_800kHz> *pcontroller;
 
-
-
 void setup() {
-
-
   Serial.begin(115200);
   delay(10);
 
-
   teensyMAC(mac);
-
-  
+ 
   static char teensyMac[23];
   sprintf(teensyMac, "MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   Serial.print("MAC: ");
   Serial.println(teensyMac);
   
-  Ethernet.begin(mac, ip);
+  //Ethernet.begin(mac, ip);
+  Serial.println("Initialize Ethernet with DHCP:");
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("Failed to configure Ethernet using DHCP");
+    // Check for Ethernet hardware present
+    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+      Serial.println("Ethernet shield was not found.  Sorry, can't run without hardware. :(");
+      while (true) {
+        delay(1); // do nothing, no point running without Ethernet hardware
+      }
+    }
+    if (Ethernet.linkStatus() == LinkOFF) {
+      Serial.println("Ethernet cable is not connected.");
+    }
+    // try to congifure using IP address instead of DHCP:
+    Ethernet.begin(mac, ip, myDns);
+  } else {
+    Serial.print("  DHCP assigned IP ");
+    Serial.println(Ethernet.localIP());
+  }
+  // give the Ethernet shield a second to initialize:
+  delay(1000);
   
+  Serial.print("connecting to ");
+  //Serial.print(server);
+  Serial.println("...");
 
   Serial.print("IP Address: ");
   Serial.println(Ethernet.localIP());
   Serial.print("MAC: ");
   Serial.println(teensyMac);
-
-
   
   Udp.begin(UDP_PORT);
   
@@ -163,7 +185,6 @@ static inline void pixelrefresh(const int syncrefresh){
   static unsigned long frameonce;
   unsigned long now = micros();
  
-
   //start frame time
   frametimestart = now;
   
@@ -196,8 +217,6 @@ frametimechk = frametimestart - frametimeend;
  }
  
 }
-
-
 
 void sacnDMXReceived(unsigned char* pbuff, int count) {
 #ifdef DEBUG
@@ -243,7 +262,6 @@ void sacnDMXReceived(unsigned char* pbuff, int count) {
       }
     }
   }
-
          uniloopcount ++;
          Serial.print("UNILOOP");
          Serial.println(uniloopcount);
@@ -260,9 +278,7 @@ void sacnDMXReceived(unsigned char* pbuff, int count) {
         //Frames Per Second Function fps(every_seconds)
         fps2(5);
         }
-
 }
-
 
 int checkACNHeaders(unsigned char* messagein, int messagelength) {
   //Do some VERY basic checks to see if it's an E1.31 packet.
@@ -404,20 +420,11 @@ void loop() {
       
 //     Serial.print("packet size first ");
 //     Serial.println(packetSize);
-
-     
-     
-
     
      sacnDMXReceived(packetBuffer, count); //process data function
-     
-    
-     
     
     }  
-
-
-
+    
   }
 
 pixelrefresh(0);
